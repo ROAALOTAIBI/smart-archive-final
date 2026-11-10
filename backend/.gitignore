@@ -1,0 +1,7 @@
+.env
+node_modules/
+dist/
+backend/.venv/
+backend/.env
+.venv/
+.envAdd-Content .gitignore "`nbackend/.env`nbackend/.env.txt`nbackend/.venv/`nbackend/__pycache__/`nnode_modules/`ndist/"
