@@ -35,3 +35,11 @@ input:focus-visible {
   outline: 2px solid #bd5688;
   outline-offset: 3px;
 }
+.text-preview mark,
+.extracted-text mark {
+  background-color: #ffe58a;
+  color: #172C3D;
+  padding: 2px 3px;
+  border-radius: 3px;
+  font-weight: 700;
+}
