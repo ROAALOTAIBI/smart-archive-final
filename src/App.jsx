@@ -147,6 +147,30 @@ function getSearchSnippet(text, query) {
   return sentences.slice(start, end).join(" ");
 }
 
+// تقسيم نصوص الملفات إلى مقاطع متداخلة لاستخدامها في RAG.
+function createTextChunks(files) {
+  const chunks = [];
+  const chunkSize = 1000;
+  const step = 800;
+
+  for (const file of files) {
+    const text = file.text || "";
+
+    for (let start = 0; start < text.length; start += step) {
+      const snippet = text.slice(start, start + chunkSize).trim();
+
+      if (!snippet) continue;
+
+      chunks.push({
+        fileName: file.name,
+        snippet,
+      });
+    }
+  }
+
+  return chunks;
+}
+
 function App() {
   const [files, setFiles] = useState(() => {
     try {
@@ -409,6 +433,32 @@ function App() {
     setAiAnswer(null);
 
     try {
+      setStatus("جارٍ تجهيز البحث الدلالي...");
+
+      // إنشاء متجه للسؤال.
+      const queryEmbedding = await createEmbedding(aiQuestion.trim());
+
+      // تقسيم جميع الملفات إلى مقاطع.
+      const textChunks = createTextChunks(availableFiles);
+
+      if (textChunks.length === 0) {
+        throw new Error("لم يتم العثور على نصوص قابلة للبحث.");
+      }
+
+      // إنشاء متجه لكل مقطع.
+      const chunksWithEmbeddings = [];
+
+      for (const chunk of textChunks) {
+        const embedding = await createEmbedding(chunk.snippet);
+
+        chunksWithEmbeddings.push({
+          ...chunk,
+          embedding,
+        });
+      }
+
+      setStatus("جارٍ إرسال المقاطع إلى مساعدك الذكي...");
+
       const response = await fetch(
         "https://smart-archive-api-eight.vercel.app/ask",
         {
@@ -419,6 +469,8 @@ function App() {
           body: JSON.stringify({
             question: aiQuestion.trim(),
             files: availableFiles,
+            query_embedding: queryEmbedding,
+            chunks: chunksWithEmbeddings,
           }),
         }
       );
@@ -434,11 +486,16 @@ function App() {
       }
 
       setAiAnswer(data);
+      setStatus("اكتمل البحث الدلالي والإجابة عن السؤال.");
     } catch (error) {
+      console.error("خطأ في المساعد الذكي:", error);
+
       setAiAnswer({
         answer: error.message || "تعذّر الاتصال بخادم الذكاء الاصطناعي.",
         sources: [],
       });
+
+      setStatus("تعذرت معالجة السؤال.");
     } finally {
       setAiLoading(false);
     }
@@ -680,7 +737,8 @@ function App() {
             والبحث عن الكلمات داخل محتوياتها.
           </p>
           <p>
-            البحث الحالي يعتمد على الكلمات؛ البحث الدلالي وRAG يحتاجان إلى تطوير إضافي.
+            البحث الدلالي ومساعد RAG يستخدمان الآن Embeddings لفهم التشابه
+            بين السؤال ومحتوى الملفات.
           </p>
         </section>
       </main>

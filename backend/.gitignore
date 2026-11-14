@@ -1,7 +1,21 @@
+
+# Environment variables and secrets
 .env
+.env.*
+!.env.example
+backend/.env
+backend/.env.txt
+
+# Python
+.venv/
+backend/.venv/
+__pycache__/
+backend/__pycache__/
+*.pyc
+
+# Node.js
 node_modules/
 dist/
-backend/.venv/
-backend/.env
-.venv/
-.envAdd-Content .gitignore "`nbackend/.env`nbackend/.env.txt`nbackend/.venv/`nbackend/__pycache__/`nnode_modules/`ndist/"
+
+# Local files
+*.log
