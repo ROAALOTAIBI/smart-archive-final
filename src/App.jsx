@@ -5,7 +5,7 @@ import "react-pdf/dist/Page/AnnotationLayer.css";
 import "./App.css";
 import { createEmbedding, cosineSimilarity } from "./semanticSearch.js";
 import { useEffect, useMemo, useState } from "react";
-
+import { supabase } from "./supabaseClient";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import mammoth from "mammoth";
@@ -33,16 +33,57 @@ async function extractText(file) {
     const worker = await createWorker("ara+eng");
 
     try {
+      await worker.setParameters({
+        preserve_interword_spaces: "1",
+        user_defined_dpi: "300",
+      });
+
       for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
         const page = await pdf.getPage(pageNumber);
         const viewport = page.getViewport({ scale: 5 });
         const canvas = document.createElement("canvas");
-        const context = canvas.getContext("2d");
+        const context = canvas.getContext("2d", {
+          willReadFrequently: true,
+        });
 
         canvas.width = Math.ceil(viewport.width);
         canvas.height = Math.ceil(viewport.height);
 
-        await page.render({ canvasContext: context, viewport }).promise;
+        context.fillStyle = "#FFFFFF";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+
+        await page.render({
+          canvasContext: context,
+          viewport,
+        }).promise;
+
+        const imageData = context.getImageData(
+          0,
+          0,
+          canvas.width,
+          canvas.height
+        );
+
+        const pixels = imageData.data;
+
+        for (let i = 0; i < pixels.length; i += 4) {
+          const gray =
+            0.299 * pixels[i] +
+            0.587 * pixels[i + 1] +
+            0.114 * pixels[i + 2];
+
+          const adjusted = Math.max(
+            0,
+            Math.min(255, (gray - 128) * 1.2 + 128)
+          );
+
+          pixels[i] = adjusted;
+          pixels[i + 1] = adjusted;
+          pixels[i + 2] = adjusted;
+        }
+
+        context.putImageData(imageData, 0, 0);
+
         const result = await worker.recognize(canvas);
         pages.push(result.data.text);
 
@@ -82,9 +123,7 @@ async function extractText(file) {
 function highlightText(text, query) {
   const words = [...new Set(query.trim().split(/\s+/).filter(Boolean))];
 
-  if (words.length === 0) {
-    return text;
-  }
+  if (words.length === 0) return text;
 
   const escapedWords = words.map((word) =>
     word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
@@ -141,13 +180,14 @@ function getSearchSnippet(text, query) {
 
   if (matchIndex === -1) return "";
 
-  const start = Math.max(0, matchIndex - 1);
-  const end = Math.min(sentences.length, matchIndex + 2);
-
-  return sentences.slice(start, end).join(" ");
+  return sentences
+    .slice(
+      Math.max(0, matchIndex - 1),
+      Math.min(sentences.length, matchIndex + 2)
+    )
+    .join(" ");
 }
 
-// تقسيم نصوص الملفات إلى مقاطع متداخلة لاستخدامها في RAG.
 function createTextChunks(files) {
   const chunks = [];
   const chunkSize = 1000;
@@ -174,7 +214,14 @@ function createTextChunks(files) {
 function App() {
   const [files, setFiles] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem("smart-archive-files") || "[]");
+      const savedFiles = JSON.parse(
+        localStorage.getItem("smart-archive-files") || "[]"
+      );
+
+      return savedFiles.map((file) => ({
+        ...file,
+        pdfUrl: null,
+      }));
     } catch {
       return [];
     }
@@ -189,6 +236,108 @@ function App() {
   const [status, setStatus] = useState("");
   const [expandedId, setExpandedId] = useState(null);
 
+  // Authentication states
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authMode, setAuthMode] = useState("login");
+  const [authMessage, setAuthMessage] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+
+  // Check current login session
+  useEffect(() => {
+    let mounted = true;
+
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!mounted) return;
+
+      if (error) {
+        setAuthMessage(error.message);
+      }
+
+      setSession(data?.session ?? null);
+      setAuthLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, currentSession) => {
+      if (!mounted) return;
+
+      setSession(currentSession);
+      setAuthLoading(false);
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  // Sign up or sign in
+  const handleAuth = async (event) => {
+    event.preventDefault();
+
+    if (!email.trim() || !password) {
+      setAuthMessage("يرجى إدخال البريد الإلكتروني وكلمة المرور.");
+      return;
+    }
+
+    if (password.length < 6) {
+      setAuthMessage("يجب أن تتكون كلمة المرور من 6 أحرف على الأقل.");
+      return;
+    }
+
+    setAuthBusy(true);
+    setAuthMessage("");
+
+    try {
+      if (authMode === "signup") {
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+        });
+
+        if (error) throw error;
+
+        if (data.session) {
+          setAuthMessage("تم إنشاء الحساب بنجاح.");
+        } else {
+          setAuthMessage(
+            "تم إنشاء الحساب. تحققي من بريدك الإلكتروني إذا طُلب منك تأكيده."
+          );
+        }
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
+
+        if (error) throw error;
+      }
+    } catch (error) {
+      setAuthMessage(
+        error.message || "حدث خطأ أثناء تسجيل الدخول. حاولي مرة أخرى."
+      );
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  // Sign out
+  const handleLogout = async () => {
+    const { error } = await supabase.auth.signOut();
+
+    if (error) {
+      setAuthMessage(error.message);
+    } else {
+      setPassword("");
+      setEmail("");
+      setAuthMessage("");
+    }
+  };
+
   useEffect(() => {
     try {
       localStorage.setItem("smart-archive-files", JSON.stringify(files));
@@ -200,9 +349,7 @@ function App() {
   const lexicalFiltered = useMemo(() => {
     const searchTerm = query.trim().toLowerCase();
 
-    if (!searchTerm) {
-      return files;
-    }
+    if (!searchTerm) return files;
 
     const searchWords = [...new Set(searchTerm.split(/\s+/))];
 
@@ -323,14 +470,10 @@ function App() {
     return combined;
   }, [query, files, semanticResults, lexicalFiltered]);
 
-  console.log("Semantic results:", semanticResults);
-
   const handleUpload = async (event) => {
     const selectedFiles = Array.from(event.target.files || []);
 
-    if (selectedFiles.length === 0) {
-      return;
-    }
+    if (selectedFiles.length === 0) return;
 
     setLoading(true);
     setStatus("جارٍ استخراج النصوص من الملفات...");
@@ -342,7 +485,6 @@ function App() {
 
       try {
         const text = await extractText(file);
-
         let embedding = null;
 
         if (text && text.trim()) {
@@ -397,15 +539,11 @@ function App() {
   const removeFile = (id) => {
     setFiles((previous) => previous.filter((file) => file.id !== id));
 
-    if (expandedId === id) {
-      setExpandedId(null);
-    }
+    if (expandedId === id) setExpandedId(null);
   };
 
   const formatSize = (bytes) => {
-    if (bytes < 1024) {
-      return `${bytes} بايت`;
-    }
+    if (bytes < 1024) return `${bytes} بايت`;
 
     if (bytes < 1024 * 1024) {
       return `${(bytes / 1024).toFixed(1)} كيلوبايت`;
@@ -435,17 +573,13 @@ function App() {
     try {
       setStatus("جارٍ تجهيز البحث الدلالي...");
 
-      // إنشاء متجه للسؤال.
       const queryEmbedding = await createEmbedding(aiQuestion.trim());
-
-      // تقسيم جميع الملفات إلى مقاطع.
       const textChunks = createTextChunks(availableFiles);
 
       if (textChunks.length === 0) {
         throw new Error("لم يتم العثور على نصوص قابلة للبحث.");
       }
 
-      // إنشاء متجه لكل مقطع.
       const chunksWithEmbeddings = [];
 
       for (const chunk of textChunks) {
@@ -501,6 +635,115 @@ function App() {
     }
   };
 
+  // Loading screen
+  if (authLoading) {
+    return (
+      <div className="app" dir="rtl">
+        <header className="hero">
+          <div className="logo">✦</div>
+          <h1>الأرشيف الذكي</h1>
+          <p className="intro">جارٍ التحقق من حسابك...</p>
+        </header>
+      </div>
+    );
+  }
+
+  // Login and signup screen
+  if (!session) {
+    return (
+      <div className="app" dir="rtl">
+        <header className="hero">
+          <div className="logo">✦</div>
+          <p className="eyebrow">مساحتك المعرفية</p>
+          <h1>الأرشيف الذكي</h1>
+          <p className="intro">
+            نظّم ملفاتك، وابحث في محتوياتها، واسترجع معلوماتك بسهولة.
+          </p>
+        </header>
+
+        <main className="auth-container">
+          <h2>
+            {authMode === "login" ? "مرحبًا بعودتك" : "إنشاء حساب جديد"}
+          </h2>
+
+          <p>
+            {authMode === "login"
+              ? "سجّل الدخول للوصول إلى أرشيفك الذكي."
+              : "أنشئ حسابك وابدأ بتنظيم ملفاتك."}
+          </p>
+
+          <form onSubmit={handleAuth}>
+            <input
+              className="auth-input"
+              type="email"
+              placeholder="البريد الإلكتروني"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              autoComplete="email"
+              required
+            />
+
+            <input
+              className="auth-input"
+              type="password"
+              placeholder="كلمة المرور"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete={
+                authMode === "login" ? "current-password" : "new-password"
+              }
+              minLength={6}
+              required
+            />
+
+            <button
+              className="auth-submit"
+              type="submit"
+              disabled={authBusy}
+            >
+              {authBusy
+                ? "يرجى الانتظار..."
+                : authMode === "login"
+                  ? "تسجيل الدخول"
+                  : "إنشاء الحساب"}
+            </button>
+          </form>
+
+          {authMessage && (
+            <p
+              className={
+                authMessage.includes("خطأ") ||
+                authMessage.includes("يرجى") ||
+                authMessage.includes("يجب")
+                  ? "error-message"
+                  : "status"
+              }
+              role="status"
+            >
+              {authMessage}
+            </p>
+          )}
+
+          <button
+            className="auth-switch"
+            type="button"
+            onClick={() => {
+              setAuthMode(authMode === "login" ? "signup" : "login");
+              setAuthMessage("");
+            }}
+          >
+            {authMode === "login"
+              ? "ليس لديك حساب؟ أنشئ حسابًا جديدًا"
+              : "لديك حساب بالفعل؟ سجّل الدخول"}
+          </button>
+        </main>
+
+        <footer>الأرشيف الذكي — تنظيم المعرفة في مكان واحد</footer>
+      </div>
+    );
+  }
+
+  // Main archive after login
   return (
     <div className="app" dir="rtl">
       <header className="hero">
@@ -510,9 +753,20 @@ function App() {
         <p className="intro">
           اجمع ملفاتك في مكان واحد، واستخرج النصوص منها، وابحث عن معلوماتك بسهولة.
         </p>
+
         <a className="primary-button" href="#archive">
           ابدأ الآن
         </a>
+
+        <div style={{ marginTop: "18px" }}>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={handleLogout}
+          >
+            تسجيل الخروج
+          </button>
+        </div>
       </header>
 
       <main className="content">
@@ -647,23 +901,6 @@ function App() {
                           ? "إخفاء النص"
                           : "عرض النص المستخرج"}
                       </button>
-
-                      {file.pdfUrl && (
-                        <div className="pdf-preview">
-                          <Document
-                            file={file.pdfUrl}
-                            loading="جارٍ تحميل PDF..."
-                            error="تعذر عرض ملف PDF."
-                          >
-                            <Page
-                              pageNumber={1}
-                              width={600}
-                              renderTextLayer
-                              renderAnnotationLayer
-                            />
-                          </Document>
-                        </div>
-                      )}
 
                       {expandedId === file.id && (
                         <div className="extracted-text">

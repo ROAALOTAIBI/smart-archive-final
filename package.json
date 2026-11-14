@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.1",
+    "@supabase/supabase-js": "^2.119.0",
     "mammoth": "^1.13.0",
     "pdfjs-dist": "^6.3.289",
     "react": "^19.2.8",
