@@ -594,7 +594,7 @@ function App() {
       setStatus("جارٍ إرسال المقاطع إلى مساعدك الذكي...");
 
       const response = await fetch(
-        ""https://smart-archive-final.vercel.app/ask",",
+        "https://smart-archive-final.vercel.app/ask",
         {
           method: "POST",
           headers: {
