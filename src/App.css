@@ -432,3 +432,13 @@ footer {
   font-weight: bold;
   cursor: pointer;
 }
+.image-preview {
+  display: block;
+  width: 100%;
+  max-height: 320px;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--warm-white);
+  object-fit: contain;
+}

@@ -1,7 +1,4 @@
 
-import { Document, Page } from "react-pdf";
-import "react-pdf/dist/Page/TextLayer.css";
-import "react-pdf/dist/Page/AnnotationLayer.css";
 import "./App.css";
 import { createEmbedding, cosineSimilarity } from "./semanticSearch.js";
 import { useEffect, useMemo, useState } from "react";
@@ -13,90 +10,99 @@ import { createWorker } from "tesseract.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
+  
 async function extractText(file) {
   const extension = file.name.split(".").pop().toLowerCase();
 
+  // TXT
   if (extension === "txt") {
-    return await file.text();
+    return (await file.text()).trim();
   }
 
+  // DOCX
   if (extension === "docx") {
     const buffer = await file.arrayBuffer();
-    const result = await mammoth.extractRawText({ arrayBuffer: buffer });
-    return result.value;
+    const result = await mammoth.extractRawText({
+      arrayBuffer: buffer,
+    });
+
+    return result.value.trim();
   }
 
+  // PDF: extract native text first, OCR only scanned pages
   if (extension === "pdf") {
-    const buffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-    const pages = [];
-    const worker = await createWorker("ara+eng");
+  const buffer = await file.arrayBuffer();
 
-    try {
-      await worker.setParameters({
-        preserve_interword_spaces: "1",
-        user_defined_dpi: "300",
-      });
+  const pdf = await pdfjsLib.getDocument({
+    data: buffer,
+  }).promise;
 
-      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
-        const page = await pdf.getPage(pageNumber);
-        const viewport = page.getViewport({ scale: 5 });
-        const canvas = document.createElement("canvas");
-        const context = canvas.getContext("2d", {
-          willReadFrequently: true,
-        });
+  const pages = [];
+  const worker = await createWorker("ara+eng");
 
-        canvas.width = Math.ceil(viewport.width);
-        canvas.height = Math.ceil(viewport.height);
+  try {
+    await worker.setParameters({
+      preserve_interword_spaces: "1",
+      user_defined_dpi: "300",
+    });
 
-        context.fillStyle = "#FFFFFF";
-        context.fillRect(0, 0, canvas.width, canvas.height);
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 5 });
 
-        await page.render({
-          canvasContext: context,
-          viewport,
-        }).promise;
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
 
-        const imageData = context.getImageData(
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+
+      context.fillStyle = "#FFFFFF";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+
+      await page.render({
+        canvasContext: context,
+        viewport,
+      }).promise;
+
+      const imageData = context.getImageData(
+        0, 0, canvas.width, canvas.height
+      );
+
+      const pixels = imageData.data;
+
+      for (let i = 0; i < pixels.length; i += 4) {
+        const gray =
+          0.299 * pixels[i] +
+          0.587 * pixels[i + 1] +
+          0.114 * pixels[i + 2];
+
+        const contrast = Math.max(
           0,
-          0,
-          canvas.width,
-          canvas.height
+          Math.min(255, (gray - 128) * 1.3 + 128)
         );
 
-        const pixels = imageData.data;
-
-        for (let i = 0; i < pixels.length; i += 4) {
-          const gray =
-            0.299 * pixels[i] +
-            0.587 * pixels[i + 1] +
-            0.114 * pixels[i + 2];
-
-          const adjusted = Math.max(
-            0,
-            Math.min(255, (gray - 128) * 1.2 + 128)
-          );
-
-          pixels[i] = adjusted;
-          pixels[i + 1] = adjusted;
-          pixels[i + 2] = adjusted;
-        }
-
-        context.putImageData(imageData, 0, 0);
-
-        const result = await worker.recognize(canvas);
-        pages.push(result.data.text);
-
-        canvas.width = 0;
-        canvas.height = 0;
+        pixels[i] = contrast;
+        pixels[i + 1] = contrast;
+        pixels[i + 2] = contrast;
       }
 
-      return pages.join("\n\n");
-    } finally {
-      await worker.terminate();
-    }
-  }
+      context.putImageData(imageData, 0, 0);
 
+      const result = await worker.recognize(canvas);
+      pages.push((result.data.text || "").trim());
+
+      canvas.width = 0;
+      canvas.height = 0;
+      page.cleanup();
+    }
+
+    return pages.filter(Boolean).join("\n\n").trim();
+   } finally {
+  await worker.terminate();
+}
+}
+
+  // Images: PNG, JPG, WEBP, BMP, TIFF
   if (file.type.startsWith("image/")) {
     const worker = await createWorker("ara+eng");
 
@@ -104,14 +110,38 @@ async function extractText(file) {
       const image = await createImageBitmap(file);
       const canvas = document.createElement("canvas");
       const context = canvas.getContext("2d");
-      const scale = 3;
 
-      canvas.width = image.width * scale;
-      canvas.height = image.height * scale;
-      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      if (!context) {
+        image.close();
+        throw new Error("تعذر تجهيز الصورة للقراءة.");
+      }
+
+      const scale = Math.min(
+        2.5,
+        4000 / Math.max(image.width, image.height)
+      );
+
+      canvas.width = Math.round(image.width * scale);
+      canvas.height = Math.round(image.height * scale);
+
+      context.fillStyle = "#FFFFFF";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+
+      context.drawImage(
+        image,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+      );
 
       const result = await worker.recognize(canvas);
-      return result.data.text;
+
+      image.close();
+      canvas.width = 0;
+      canvas.height = 0;
+
+      return (result.data.text || "").trim();
     } finally {
       await worker.terminate();
     }
@@ -119,7 +149,20 @@ async function extractText(file) {
 
   throw new Error("نوع الملف غير مدعوم.");
 }
+async function createImagePreviewUrl(storagePath) {
+  if (!storagePath) return null;
 
+  const { data, error } = await supabase.storage
+    .from("archive-files")
+    .createSignedUrl(storagePath, 3600);
+
+  if (error) {
+    console.error("تعذر إنشاء رابط الصورة:", error);
+    return null;
+  }
+
+  return data?.signedUrl || null;
+}
 function highlightText(text, query) {
   const words = [...new Set(query.trim().split(/\s+/).filter(Boolean))];
 
@@ -212,20 +255,9 @@ function createTextChunks(files) {
 }
 
 function App() {
-  const [files, setFiles] = useState(() => {
-    try {
-      const savedFiles = JSON.parse(
-        localStorage.getItem("smart-archive-files") || "[]"
-      );
-
-      return savedFiles.map((file) => ({
-        ...file,
-        pdfUrl: null,
-      }));
-    } catch {
-      return [];
-    }
-  });
+  // Archive states
+  const [files, setFiles] = useState([]);
+  const [filesLoaded, setFilesLoaded] = useState(false);
 
   const [query, setQuery] = useState("");
   const [aiQuestion, setAiQuestion] = useState("");
@@ -274,6 +306,77 @@ function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  // Load only the logged-in user's files from Supabase
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadUserFiles() {
+      const userId = session?.user?.id;
+
+      if (!userId) {
+        setFiles([]);
+        setFilesLoaded(true);
+        return;
+      }
+
+      setFilesLoaded(false);
+      setStatus("جارٍ تحميل ملفاتك من الأرشيف...");
+
+      try {
+        const { data, error } = await supabase
+          .from("archive_files")
+          .select(
+            "id, user_id, name, content, file_size, mime_type, storage_path, embedding, created_at"
+          )
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false });
+
+        if (error) throw error;
+
+        if (cancelled) return;
+
+     const loadedFiles = await Promise.all(
+  (data || []).map(async (row) => ({
+    id: row.id,
+    name: row.name,
+    size: row.file_size || 0,
+    type: row.mime_type || "",
+    text: row.content || "",
+    embedding: Array.isArray(row.embedding)
+      ? row.embedding
+      : null,
+    storagePath: row.storage_path || null,
+    imageUrl: row.mime_type?.startsWith("image/")
+      ? await createImagePreviewUrl(row.storage_path)
+      : null,
+    pdfUrl: null,
+    error: "",
+  }))
+);
+
+        setFiles(loadedFiles);
+        setStatus("تم تحميل أرشيفك بنجاح.");
+      } catch (error) {
+        console.error("تعذر تحميل الملفات:", error);
+
+        if (!cancelled) {
+          setFiles([]);
+          setStatus("تعذر تحميل ملفات الأرشيف: " + error.message);
+        }
+      } finally {
+        if (!cancelled) {
+          setFilesLoaded(true);
+        }
+      }
+    }
+
+    loadUserFiles();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.user?.id]);
 
   // Sign up or sign in
   const handleAuth = async (event) => {
@@ -335,17 +438,13 @@ function App() {
       setPassword("");
       setEmail("");
       setAuthMessage("");
+      setAiAnswer(null);
+      setAiQuestion("");
+      setQuery("");
     }
   };
 
-  useEffect(() => {
-    try {
-      localStorage.setItem("smart-archive-files", JSON.stringify(files));
-    } catch (error) {
-      console.error("تعذر حفظ الأرشيف:", error);
-    }
-  }, [files]);
-
+  // Lexical search
   const lexicalFiltered = useMemo(() => {
     const searchTerm = query.trim().toLowerCase();
 
@@ -376,6 +475,7 @@ function App() {
       .sort((a, b) => b.score - a.score);
   }, [files, query]);
 
+  // Semantic search
   useEffect(() => {
     let cancelled = false;
     const searchTerm = query.trim();
@@ -470,21 +570,33 @@ function App() {
     return combined;
   }, [query, files, semanticResults, lexicalFiltered]);
 
+  // Upload files to Supabase Storage and save their data in Supabase Database
   const handleUpload = async (event) => {
     const selectedFiles = Array.from(event.target.files || []);
+    const userId = session?.user?.id;
 
     if (selectedFiles.length === 0) return;
 
+    if (!userId) {
+      setStatus("يرجى تسجيل الدخول قبل رفع الملفات.");
+      event.target.value = "";
+      return;
+    }
+
     setLoading(true);
-    setStatus("جارٍ استخراج النصوص من الملفات...");
+    setStatus("جارٍ استخراج النصوص وحفظ الملفات...");
 
     const processedFiles = [];
+    let successCount = 0;
 
     for (const file of selectedFiles) {
-      const id = `${Date.now()}-${Math.random()}`;
+      let storagePath = null;
 
       try {
+        // Extract file text
         const text = await extractText(file);
+
+        // Create embedding
         let embedding = null;
 
         if (text && text.trim()) {
@@ -495,51 +607,144 @@ function App() {
           }
         }
 
+        // Create a unique path for this user's file
+        const extension = file.name.includes(".")
+  ? file.name.split(".").pop().toLowerCase().replace(/[^a-z0-9]/g, "")
+  : "bin";
+
+const safeName = `${Date.now()}_${Math.random().toString(36).slice(2)}.${extension}`;
+        const uniqueName =
+          typeof crypto !== "undefined" && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+        storagePath = `${userId}/${uniqueName}_${safeName}`;
+
+        // Upload original file to private Storage bucket
+        const { error: storageError } = await supabase.storage
+          .from("archive-files")
+          .upload(storagePath, file, {
+            contentType: file.type || "application/octet-stream",
+            upsert: false,
+          });
+
+        if (storageError) throw storageError;
+
+        // Save extracted text and metadata in Database
+        const { data, error: databaseError } = await supabase
+          .from("archive_files")
+          .insert({
+            user_id: userId,
+            name: file.name,
+            content: text || "",
+            file_size: file.size,
+            mime_type: file.type || "",
+            storage_path: storagePath,
+            embedding,
+          })
+          .select()
+          .single();
+
+        if (databaseError) throw databaseError;
+
         processedFiles.push({
-          id,
-          name: file.name,
-          size: file.size,
-          pdfUrl:
-            file.type === "application/pdf"
-              ? URL.createObjectURL(file)
-              : null,
-          text: text || "",
-          embedding,
-          error: "",
+          id: data.id,
+          name: data.name,
+          size: data.file_size || 0,
+          type: data.mime_type || "",
+          text: data.content || "",
+          embedding: Array.isArray(data.embedding)
+            ? data.embedding
+            : null,
+          storagePath: data.storage_path,
+imageUrl: file.type.startsWith("image/")
+  ? await createImagePreviewUrl(data.storage_path)
+  : null,
+pdfUrl: null,
+error: "",
         });
+
+        successCount++;
       } catch (error) {
+        console.error(`تعذر حفظ الملف ${file.name}:`, error);
+
+        // Remove uploaded Storage file if Database insertion failed
+        if (storagePath) {
+          await supabase.storage
+            .from("archive-files")
+            .remove([storagePath]);
+        }
+
         processedFiles.push({
-          id,
+          id: `failed-${Date.now()}-${Math.random()}`,
           name: file.name,
           size: file.size,
-          pdfUrl:
-            file.type === "application/pdf"
-              ? URL.createObjectURL(file)
-              : null,
+          type: file.type || "",
           text: "",
-          error: error.message || "تعذرت معالجة الملف.",
+          embedding: null,
+          storagePath: null,
+          pdfUrl: null,
+          error: error.message || "تعذرت معالجة الملف أو حفظه.",
         });
       }
     }
 
-    setFiles((previous) => [...processedFiles, ...previous]);
-
-    const successCount = processedFiles.filter(
-      (file) => !file.error
-    ).length;
+    setFiles((previous) => [
+      ...processedFiles.filter((file) => !file.error),
+      ...processedFiles.filter((file) => file.error),
+      ...previous,
+    ]);
 
     setStatus(
-      `انتهت المعالجة: نجح ${successCount} من ${processedFiles.length} ملف.`
+      `انتهت العملية: تم حفظ ${successCount} من ${selectedFiles.length} ملف في حسابك.`
     );
 
     setLoading(false);
     event.target.value = "";
   };
 
-  const removeFile = (id) => {
-    setFiles((previous) => previous.filter((file) => file.id !== id));
+  // Delete a file from Database and Storage
+  const removeFile = async (id) => {
+    const userId = session?.user?.id;
+    const fileToRemove = files.find((file) => file.id === id);
 
-    if (expandedId === id) setExpandedId(null);
+    if (!userId || !fileToRemove) return;
+
+    // Failed local uploads are not stored in Supabase
+    if (String(id).startsWith("failed-")) {
+      setFiles((previous) => previous.filter((file) => file.id !== id));
+      if (expandedId === id) setExpandedId(null);
+      return;
+    }
+
+    try {
+      const { error: databaseError } = await supabase
+        .from("archive_files")
+        .delete()
+        .eq("id", id)
+        .eq("user_id", userId);
+
+      if (databaseError) throw databaseError;
+
+      if (fileToRemove.storagePath) {
+        const { error: storageError } = await supabase.storage
+          .from("archive-files")
+          .remove([fileToRemove.storagePath]);
+
+        if (storageError) {
+          console.error("تعذر حذف الملف من Storage:", storageError);
+        }
+      }
+
+      setFiles((previous) => previous.filter((file) => file.id !== id));
+
+      if (expandedId === id) setExpandedId(null);
+
+      setStatus("تم حذف الملف من أرشيفك.");
+    } catch (error) {
+      console.error("تعذر حذف الملف:", error);
+      setStatus("تعذر حذف الملف: " + error.message);
+    }
   };
 
   const formatSize = (bytes) => {
@@ -552,6 +757,7 @@ function App() {
     return `${(bytes / (1024 * 1024)).toFixed(1)} ميجابايت`;
   };
 
+  // Ask AI using the current user's archive
   const handleAskAI = async () => {
     if (!aiQuestion.trim() || aiLoading) return;
 
@@ -743,6 +949,19 @@ function App() {
     );
   }
 
+  // Wait until this user's cloud archive has loaded
+  if (!filesLoaded) {
+    return (
+      <div className="app" dir="rtl">
+        <header className="hero">
+          <div className="logo">✦</div>
+          <h1>الأرشيف الذكي</h1>
+          <p className="intro">جارٍ تحميل أرشيفك...</p>
+        </header>
+      </div>
+    );
+  }
+
   // Main archive after login
   return (
     <div className="app" dir="rtl">
@@ -853,8 +1072,23 @@ function App() {
                   <div className="file-header">
                     <div className="file-icon">📄</div>
 
-                    <div className="file-details">
-                      <h3>{file.name}</h3>
+                   <div className="file-details">
+  <h3>{file.name}</h3>
+
+  {file.type.startsWith("image/") && file.imageUrl && (
+    <img
+      src={file.imageUrl}
+      alt={file.name}
+      style={{
+        display: "block",
+        maxWidth: "100%",
+        maxHeight: "260px",
+        objectFit: "contain",
+        margin: "12px 0",
+        borderRadius: "10px",
+      }}
+    />
+  )}
                       <p className="file-snippet">
                         {file.text
                           ? highlightText(
